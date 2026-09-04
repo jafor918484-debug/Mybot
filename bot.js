@@ -49,12 +49,15 @@ async function sendAutoDeleteWarning(ctx, text) {
   };
 }
 
-// Inline Keyboards
-const startKeyboard = new InlineKeyboard()
-  .url("Add to Group", `https://t.me/${bot.botInfo?.username || "MasterRemoverBot"}?startgroup=true`)
-  .row()
-  .text("Command List", "cmd_list")
-  .text("Info", "info_text");
+// Helper to generate dynamic start keyboard safely
+function getStartKeyboard(username) {
+  const botUsername = username || "MasterRemoverBot";
+  return new InlineKeyboard()
+    .url("Add to Group", `https://t.me/${botUsername}?startgroup=true`)
+    .row()
+    .text("Command List", "cmd_list")
+    .text("Info", "info_text");
+}
 
 const backKeyboard = new InlineKeyboard()
   .text("Back", "go_back");
@@ -62,17 +65,18 @@ const backKeyboard = new InlineKeyboard()
 // /start Command Handler
 bot.command("start", async (ctx) => {
   const welcomeText = "Hello! I am Master Remover Bot. I help manage Telegram groups by automating moderation, tracking warnings, and enforcing temporary mutes.\n\nSelect an option below to learn more:";
-  await ctx.reply(welcomeText, { reply_markup: startKeyboard });
+  const keyboard = getStartKeyboard(ctx.me.username);
+  await ctx.reply(welcomeText, { reply_markup: keyboard });
 });
 
-// /setwarning Command Handler (Stops active warning session)
+// /setwarning Command Handler
 bot.command("setwarning", async (ctx) => {
   const chatId = ctx.chat.id;
   userWarningSessions.set(chatId, false);
   await ctx.reply("Warning configuration has been updated and saved successfully.");
 });
 
-// /setmutetime Command Handler (Admins set custom mute duration in minutes)
+// /setmutetime Command Handler
 bot.command("setmutetime", async (ctx) => {
   const chatId = ctx.chat.id;
   const args = ctx.message.text.split(" ");
@@ -155,11 +159,12 @@ Warning & Auto-Mute System Rules:
 
 bot.callbackQuery("go_back", async (ctx) => {
   const welcomeText = "Hello! I am Master Remover Bot. I help manage Telegram groups by automating moderation, tracking warnings, and enforcing temporary mutes.\n\nSelect an option below to learn more:";
-  await ctx.editMessageText(welcomeText, { reply_markup: startKeyboard });
+  const keyboard = getStartKeyboard(ctx.me.username);
+  await ctx.editMessageText(welcomeText, { reply_markup: keyboard });
   await ctx.answerCallbackQuery();
 });
 
-// Text Messages Listener (Warning, Echo & Auto-Mute Logic)
+// Text Messages Listener
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
   const chatId = ctx.chat.id;
