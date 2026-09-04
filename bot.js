@@ -40,7 +40,7 @@ async function sendAutoDeleteWarning(ctx, text) {
     if (lastWarningMessage && lastWarningMessage.messageId === sentMsg.message_id) {
       lastWarningMessage = null;
     }
-  }, 5 * 60 * 1000); // 5 minutes
+  }, 5 * 60 * 1000); // 5 minutes timer
 
   lastWarningMessage = {
     chatId: sentMsg.chat.id,
@@ -49,7 +49,7 @@ async function sendAutoDeleteWarning(ctx, text) {
   };
 }
 
-// Keyboards
+// Inline Keyboards
 const startKeyboard = new InlineKeyboard()
   .url("Add to Group", `https://t.me/${bot.botInfo?.username || "MasterRemoverBot"}?startgroup=true`)
   .row()
@@ -65,14 +65,14 @@ bot.command("start", async (ctx) => {
   await ctx.reply(welcomeText, { reply_markup: startKeyboard });
 });
 
-// /setwarning Command Handler
+// /setwarning Command Handler (Stops active warning session)
 bot.command("setwarning", async (ctx) => {
   const chatId = ctx.chat.id;
   userWarningSessions.set(chatId, false);
   await ctx.reply("Warning configuration has been updated and saved successfully.");
 });
 
-// /setmutetime Command Handler (Admins set mute duration in minutes)
+// /setmutetime Command Handler (Admins set custom mute duration in minutes)
 bot.command("setmutetime", async (ctx) => {
   const chatId = ctx.chat.id;
   const args = ctx.message.text.split(" ");
@@ -87,7 +87,7 @@ bot.command("setmutetime", async (ctx) => {
   await ctx.reply(`Mute duration successfully updated to ${minutes} minutes.`);
 });
 
-// Callback Queries
+// Callback Queries Handling
 bot.callbackQuery("cmd_list", async (ctx) => {
   const commandText = 
 `COMMAND LIST AND USAGE
@@ -96,7 +96,7 @@ bot.callbackQuery("cmd_list", async (ctx) => {
 Command: Type 'morning' in chat
 Usage: Starts active warning monitoring until /setwarning is executed.
 
-2. Save Warning Config
+2. Save Warning Configuration
 Command: /setwarning
 Usage: Saves warning configuration and stops the warning mode.
 
@@ -107,19 +107,28 @@ Example: /setmutetime 15
 
 4. Anti-Link Filter [ ON / OFF ]
 Command: /antilink [on|off]
-Usage: Enables or disables automatic removal of links.
+Usage: Enables or disables automatic removal of links sent by non-admin members.
+Example: /antilink on
 
 5. Bot Remover [ ON / OFF ]
 Command: /autoblockbot [on|off]
 Usage: Automatically removes newly added bots.
+Example: /autoblockbot on
 
-6. Manual Kick User
+6. Service Message Cleaner [ ON / OFF ]
+Command: /cleanjoins [on|off]
+Usage: Automatically deletes join/leave notifications.
+Example: /cleanjoins on
+
+7. Manual Kick User
 Command: /kick [reply or user_id]
 Usage: Kicks a member from the group.
+Example: /kick @username
 
-7. Manual Ban User
+8. Manual Ban User
 Command: /ban [reply or user_id]
-Usage: Bans a member permanently.`;
+Usage: Bans a member permanently.
+Example: /ban @username`;
 
   await ctx.editMessageText(commandText, { reply_markup: backKeyboard });
   await ctx.answerCallbackQuery();
@@ -133,7 +142,7 @@ Overview:
 Master Remover is an automated group administration tool designed to maintain clean, orderly, and secure group environments.
 
 Warning & Auto-Mute System Rules:
-1. Triggering 'morning' activates the warning session.
+1. Triggering 'morning' activates the active warning session.
 2. During active warning mode, sending messages displays a warning notification along with user message echo.
 3. Every warning issued adds to the user's warning count.
 4. If a user receives 3 warnings, the bot automatically mutes them for the configured duration (default: 5 minutes).
@@ -150,7 +159,7 @@ bot.callbackQuery("go_back", async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// Text Messages Listener
+// Text Messages Listener (Warning, Echo & Auto-Mute Logic)
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
   const chatId = ctx.chat.id;
@@ -175,7 +184,7 @@ bot.on("message:text", async (ctx) => {
       const untilDate = Math.floor(Date.now() / 1000) + (duration * 60);
 
       try {
-        // Restrict / Mute user
+        // Mute / Restrict user
         await ctx.restrictChatMember(userId, {
           can_send_messages: false
         }, { until_date: untilDate });
@@ -186,7 +195,7 @@ bot.on("message:text", async (ctx) => {
         await sendAutoDeleteWarning(ctx, muteNotice);
       } catch (err) {
         console.error("Failed to mute member:", err);
-        await sendAutoDeleteWarning(ctx, `ERROR: Unable to mute ${userName}. Please ensure the bot has Admin rights with permission to restrict members.`);
+        await sendAutoDeleteWarning(ctx, `ERROR: Unable to mute ${userName}. Please ensure the bot is an Admin with permissions to restrict members.`);
       }
     } else {
       const warningNotice = `User Message: "${text}"\n\nWARNING (${count}/3): ${userName}, group warning configuration is active. Send /setwarning to finish setup.`;
@@ -195,7 +204,7 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// Error handling
+// Global Error Handling
 bot.catch((err) => {
   console.error("Error in bot execution:", err);
 });
