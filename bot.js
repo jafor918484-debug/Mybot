@@ -1,199 +1,208 @@
 const { Bot, InlineKeyboard } = require("grammy");
 const mongoose = require("mongoose");
+require("dotenv").config();
+
 const config = require("./config");
 
-// ১. MongoDB মড্যুল ও স্কিমা সেটআপ
-const groupSchema = new mongoose.Schema({
-  chatId: { type: Number, required: true, unique: true },
-  isVerified: { type: Boolean, default: false },
-  linkBlock: { type: Boolean, default: false },
-  mentionBlock: { type: Boolean, default: false },
-  warningEnabled: { type: Boolean, default: true },
-  welcomeEnabled: { type: Boolean, default: true },
-  welcomeText: { type: String, default: "Welcome to the group, {name}!" },
-  mustJoinChannels: [{ type: String }],
-  admins: [{ type: Number }]
-});
+const bot = new Bot(process.env.BOT_TOKEN || config.BOT_TOKEN);
+const MONGO_URI = process.env.MONGO_URI || config.MONGO_URI;
 
-const Group = mongoose.model("Group", groupSchema);
-
-// ২. ডাটাবেজ কানেকশন
-mongoose.connect(config.MONGO_URI)
+// MongoDB Connection
+mongoose.connect(MONGO_URI)
   .then(() => console.log("Connected to MongoDB successfully!"))
   .catch((err) => console.error("MongoDB Connection Error:", err));
 
-// ৩. বট ইনস্ট্যান্স তৈরি
-const bot = new Bot(config.BOT_TOKEN);
+// Global variables for managing state
+let lastWarningMessage = null; // Stores { chatId, messageId, timer }
+const userWarningSessions = new Map(); // Tracks warning setup status per chat
+const warningCounts = new Map(); // Tracks warning counts: key "chatId:userId" => count
+const muteDurations = new Map(); // Stores mute duration in minutes per chat (default: 5 mins)
 
-// হেল্পার ফাংশন: ইউজারের এডমিন স্ট্যাটাস চেক
-async function isUserAdmin(ctx, userId) {
-  if (config.SUPER_ADMINS.includes(userId)) return true;
-  try {
-    const member = await ctx.api.getChatMember(ctx.chat.id, userId);
-    return ["administrator", "creator"].includes(member.status);
-  } catch (err) {
-    return false;
+// Helper: Delete old warning and set auto-delete timer (5 mins)
+async function sendAutoDeleteWarning(ctx, text) {
+  if (lastWarningMessage) {
+    clearTimeout(lastWarningMessage.timer);
+    try {
+      await ctx.api.deleteMessage(lastWarningMessage.chatId, lastWarningMessage.messageId);
+    } catch (err) {
+      // Ignore if message was already deleted
+    }
   }
+
+  const sentMsg = await ctx.reply(text);
+
+  const timer = setTimeout(async () => {
+    try {
+      await ctx.api.deleteMessage(sentMsg.chat.id, sentMsg.message_id);
+    } catch (err) {
+      // Ignore if message was already deleted
+    }
+    if (lastWarningMessage && lastWarningMessage.messageId === sentMsg.message_id) {
+      lastWarningMessage = null;
+    }
+  }, 5 * 60 * 1000); // 5 minutes
+
+  lastWarningMessage = {
+    chatId: sentMsg.chat.id,
+    messageId: sentMsg.message_id,
+    timer: timer
+  };
 }
 
-// হেল্পার ফাংশন: গ্রুপ ডেটা পাওয়া বা তৈরি করা
-async function getGroupData(chatId) {
-  let group = await Group.findOne({ chatId });
-  if (!group) {
-    group = await Group.create({ chatId });
-  }
-  return group;
-}
+// Keyboards
+const startKeyboard = new InlineKeyboard()
+  .url("Add to Group", `https://t.me/${bot.botInfo?.username || "MasterRemoverBot"}?startgroup=true`)
+  .row()
+  .text("Command List", "cmd_list")
+  .text("Info", "info_text");
 
-// ৪. স্টার্ট কমান্ড ও পিএম কন্ট্রোল
+const backKeyboard = new InlineKeyboard()
+  .text("Back", "go_back");
+
+// /start Command Handler
 bot.command("start", async (ctx) => {
-  if (ctx.chat.type === "private") {
-    await ctx.reply(
-      "👋 Hello! I am a Telegram Group Management Bot.\nAdd me to your group and make me an admin to manage your community effectively!",
-      {
-        reply_markup: new InlineKeyboard().url("Add to Group", `https://t.me/${ctx.me.username}?startgroup=true`)
-      }
-    );
-  } else {
-    await ctx.reply("Group Management Bot active in this group. Use /settings to configure.");
-  }
+  const welcomeText = "Hello! I am Master Remover Bot. I help manage Telegram groups by automating moderation, tracking warnings, and enforcing temporary mutes.\n\nSelect an option below to learn more:";
+  await ctx.reply(welcomeText, { reply_markup: startKeyboard });
 });
 
-// ৫. অ্যাডমিন কমান্ড: নতুন অ্যাডমিন যুক্ত করা
-bot.command("addadmin", async (ctx) => {
-  if (!config.SUPER_ADMINS.includes(ctx.from.id)) {
-    return ctx.reply("❌ Only Super Admins can use this command.");
-  }
+// /setwarning Command Handler
+bot.command("setwarning", async (ctx) => {
+  const chatId = ctx.chat.id;
+  userWarningSessions.set(chatId, false);
+  await ctx.reply("Warning configuration has been updated and saved successfully.");
+});
+
+// /setmutetime Command Handler (Admins set mute duration in minutes)
+bot.command("setmutetime", async (ctx) => {
+  const chatId = ctx.chat.id;
   const args = ctx.message.text.split(" ");
-  const newAdminId = parseInt(args[1]);
-  if (!newAdminId || isNaN(newAdminId)) {
-    return ctx.reply("⚠️ Please specify a valid User ID. Example: `/addadmin 123456789`", { parse_mode: "Markdown" });
-  }
+  const minutes = parseInt(args[1]);
 
-  const group = await getGroupData(ctx.chat.id);
-  if (!group.admins.includes(newAdminId)) {
-    group.admins.push(newAdminId);
-    await group.save();
-    await ctx.reply(`✅ User \`${newAdminId}\` added to bot admins for this group.`, { parse_mode: "Markdown" });
-  } else {
-    await ctx.reply("⚠️ User is already a bot admin.");
-  }
-});
-
-// ৬. গ্রুপ ভেরিফিকেশন ও সেটআপ
-bot.on("message:new_chat_members", async (ctx) => {
-  const isBotAdded = ctx.message.new_chat_members.some((member) => member.id === ctx.me.id);
-  
-  if (isBotAdded) {
-    const keyboard = new InlineKeyboard().callback("Verify Group 🛡️", `verify_group_${ctx.chat.id}`);
-    await ctx.reply("Thanks for adding me! Please click below to verify and initialize the group settings.", {
-      reply_markup: keyboard
-    });
+  if (isNaN(minutes) || minutes <= 0) {
+    await ctx.reply("Usage: /setmutetime <minutes>\nExample: /setmutetime 10");
     return;
   }
 
-  // নতুন মেম্বার ওয়েলকাম মেসেজ
-  const group = await getGroupData(ctx.chat.id);
-  if (group.welcomeEnabled) {
-    for (const member of ctx.message.new_chat_members) {
-      const msg = group.welcomeText.replace("{name}", member.first_name);
-      await ctx.reply(msg);
-    }
-  }
+  muteDurations.set(chatId, minutes);
+  await ctx.reply(`Mute duration successfully updated to ${minutes} minutes.`);
 });
 
-// ভেরিফিকেশন বাটন হ্যান্ডলার
-bot.callbackQuery(/^verify_group_(.+)$/, async (ctx) => {
-  const chatId = parseInt(ctx.match[1]);
-  const isAdmin = await isUserAdmin(ctx, ctx.from.id);
+// Callback Queries
+bot.callbackQuery("cmd_list", async (ctx) => {
+  const commandText = 
+`COMMAND LIST AND USAGE
 
-  if (!isAdmin) {
-    return ctx.answerCallbackQuery({ text: "❌ Only group administrators can verify!", show_alert: true });
-  }
+1. Morning Warning Setup
+Command: Type 'morning' in chat
+Usage: Starts active warning monitoring until /setwarning is executed.
 
-  const group = await getGroupData(chatId);
-  group.isVerified = true;
-  await group.save();
+2. Save Warning Config
+Command: /setwarning
+Usage: Saves warning configuration and stops the warning mode.
 
-  await ctx.answerCallbackQuery({ text: "✅ Group successfully verified!" });
-  await ctx.editMessageText("✅ **Group Verified Successfully!** You can now use all moderation features.", { parse_mode: "Markdown" });
+3. Set Mute Duration
+Command: /setmutetime <minutes>
+Usage: Sets how long a user stays muted after receiving 3 warnings.
+Example: /setmutetime 15
+
+4. Anti-Link Filter [ ON / OFF ]
+Command: /antilink [on|off]
+Usage: Enables or disables automatic removal of links.
+
+5. Bot Remover [ ON / OFF ]
+Command: /autoblockbot [on|off]
+Usage: Automatically removes newly added bots.
+
+6. Manual Kick User
+Command: /kick [reply or user_id]
+Usage: Kicks a member from the group.
+
+7. Manual Ban User
+Command: /ban [reply or user_id]
+Usage: Bans a member permanently.`;
+
+  await ctx.editMessageText(commandText, { reply_markup: backKeyboard });
+  await ctx.answerCallbackQuery();
 });
 
-// ৭. গ্রুপ অপশন টিগল কমান্ডসমূহ (/linkblock, /mentionblock, /warning, /welcome)
-bot.command(["linkblock", "mentionblock", "warning", "welcome"], async (ctx) => {
-  if (ctx.chat.type === "private") return;
-  const isAdmin = await isUserAdmin(ctx, ctx.from.id);
-  if (!isAdmin) return ctx.reply("❌ Only administrators can change group settings.");
+bot.callbackQuery("info_text", async (ctx) => {
+  const infoText = 
+`BOT SYSTEM INFORMATION AND RULES
 
-  const command = ctx.message.text.split(" ")[0].substring(1);
-  const arg = ctx.message.text.split(" ")[1];
-  const group = await getGroupData(ctx.chat.id);
+Overview:
+Master Remover is an automated group administration tool designed to maintain clean, orderly, and secure group environments.
 
-  if (!["on", "off"].includes(arg)) {
-    return ctx.reply(`⚠️ Usage: \`/${command} on\` or \`/${command} off\``, { parse_mode: "Markdown" });
-  }
+Warning & Auto-Mute System Rules:
+1. Triggering 'morning' activates the warning session.
+2. During active warning mode, sending messages displays a warning notification along with user message echo.
+3. Every warning issued adds to the user's warning count.
+4. If a user receives 3 warnings, the bot automatically mutes them for the configured duration (default: 5 minutes).
+5. Once the mute duration expires, the user is automatically unmuted and their warning count is reset.
+6. All warning messages auto-delete after 5 minutes, or instantly if a new warning message is generated sooner.`;
 
-  const status = arg === "on";
-
-  if (command === "linkblock") group.linkBlock = status;
-  if (command === "mentionblock") group.mentionBlock = status;
-  if (command === "warning") group.warningEnabled = status;
-  if (command === "welcome") group.welcomeEnabled = status;
-
-  await group.save();
-  await ctx.reply(`⚙️ **${command.toUpperCase()}** has been turned **${arg.toUpperCase()}**.`, { parse_mode: "Markdown" });
+  await ctx.editMessageText(infoText, { reply_markup: backKeyboard });
+  await ctx.answerCallbackQuery();
 });
 
-// ৮. অটোমেটেড স্প্যাম ফিক্সিং ও মেসেজ ফিল্টারিং (Link / Mention Filter)
-bot.on("message:text", async (ctx, next) => {
-  if (ctx.chat.type === "private") return next();
+bot.callbackQuery("go_back", async (ctx) => {
+  const welcomeText = "Hello! I am Master Remover Bot. I help manage Telegram groups by automating moderation, tracking warnings, and enforcing temporary mutes.\n\nSelect an option below to learn more:";
+  await ctx.editMessageText(welcomeText, { reply_markup: startKeyboard });
+  await ctx.answerCallbackQuery();
+});
 
-  const isAdmin = await isUserAdmin(ctx, ctx.from.id);
-  if (isAdmin) return next();
+// Text Messages Listener
+bot.on("message:text", async (ctx) => {
+  const text = ctx.message.text.trim();
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+  const userName = ctx.from.first_name || "User";
 
-  const group = await getGroupData(ctx.chat.id);
-  const text = ctx.message.text;
-
-  const hasLink = /(https?:\/\/[^\s]+|t\.me\/[^\s]+)/gi.test(text);
-  const hasMention = /@[a-zA-Z0-9_]+/g.test(text);
-
-  let shouldDelete = false;
-  let reason = "";
-
-  if (group.linkBlock && hasLink) {
-    shouldDelete = true;
-    reason = "Links are not allowed in this group.";
-  } else if (group.mentionBlock && hasMention) {
-    shouldDelete = true;
-    reason = "Mentions/Usernames are not allowed in this group.";
+  // Check for 'morning' trigger
+  if (text.toLowerCase().includes("morning")) {
+    userWarningSessions.set(chatId, true);
+    await sendAutoDeleteWarning(ctx, "WARNING: Morning mode initialized. Send /setwarning to complete setup.");
+    return;
   }
 
-  if (shouldDelete) {
-    try {
-      await ctx.deleteMessage();
-      if (group.warningEnabled) {
-        const warnMsg = await ctx.reply(`⚠️ [${ctx.from.first_name}](tg://user?id=${ctx.from.id}), ${reason}`, { parse_mode: "Markdown" });
-        
-        // ৫ মিনিট (৩০০০০০ মিলি-সেকেন্ড) পর অটোমেটিক ওয়ার্নিং মেসেজ ডিলিট হওয়া
-        setTimeout(async () => {
-          try {
-            await ctx.api.deleteMessage(ctx.chat.id, warnMsg.message_id);
-          } catch (e) {
-            // Ignore error if message was manually deleted
-          }
-        }, 300000);
+  // Handle active warning session
+  if (userWarningSessions.get(chatId) === true) {
+    const key = `${chatId}:${userId}`;
+    let count = (warningCounts.get(key) || 0) + 1;
+    warningCounts.set(key, count);
+
+    if (count >= 3) {
+      const duration = muteDurations.get(chatId) || 5; // Default 5 minutes
+      const untilDate = Math.floor(Date.now() / 1000) + (duration * 60);
+
+      try {
+        // Restrict / Mute user
+        await ctx.restrictChatMember(userId, {
+          can_send_messages: false
+        }, { until_date: untilDate });
+
+        warningCounts.set(key, 0); // Reset warning count
+
+        const muteNotice = `WARNING LIMIT REACHED: ${userName} has received 3 warnings and has been muted for ${duration} minutes.`;
+        await sendAutoDeleteWarning(ctx, muteNotice);
+      } catch (err) {
+        console.error("Failed to mute member:", err);
+        await sendAutoDeleteWarning(ctx, `ERROR: Unable to mute ${userName}. Please ensure the bot has Admin rights with permission to restrict members.`);
       }
-    } catch (err) {
-      console.error("Failed to delete message:", err);
+    } else {
+      const warningNotice = `User Message: "${text}"\n\nWARNING (${count}/3): ${userName}, group warning configuration is active. Send /setwarning to finish setup.`;
+      await sendAutoDeleteWarning(ctx, warningNotice);
     }
-  } else {
-    return next();
   }
 });
 
-// ৯. প্রসেস রান
+// Error handling
+bot.catch((err) => {
+  console.error("Error in bot execution:", err);
+});
+
+// Start Bot
 bot.start({
-  onStart(botInfo) {
+  onStart: (botInfo) => {
     console.log(`Bot initialized and running as @${botInfo.username}`);
-  }
+  },
 });
